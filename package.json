@@ -1,0 +1,40 @@
+{
+  "name": "signsync",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "test": "node --test scripts/test_hybrid_models.mjs",
+    "preview": "vite preview",
+    "record-holistic": "start standalone_recorder.html",
+    "audit-holistic": "python scripts/audit_holistic_dataset.py --strict",
+    "audit-dynamic-v2": "python scripts/audit_dynamic_v2.py --strict",
+    "preprocess-sequences": "python scripts/preprocess_hybrid_dataset.py",
+    "train-sequence-gru": "python scripts/train_hybrid_models.py",
+    "export-sequence-gru": "python scripts/export_hybrid_models_tfjs.py",
+    "preprocess-models": "python scripts/preprocess_hybrid_dataset.py",
+    "train-models": "python scripts/train_hybrid_models.py",
+    "export-models": "python scripts/export_hybrid_models_tfjs.py && python scripts/export_avatar_poses.py",
+    "export-avatar-poses": "python scripts/export_avatar_poses.py"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.8",
+    "@react-three/fiber": "^9.7.0",
+    "@tensorflow/tfjs": "^4.22.0",
+    "canvas-confetti": "^1.9.4",
+    "lucide-react": "^1.44.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "oxlint": "^1.79.0",
+    "vite": "^8.2.4"
+  }
+}

@@ -1,0 +1,37 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.venv/
+artifacts/
+__pycache__/
+*.py[cod]
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Development-only files (not needed in production)
+dataset_holistic_Dynamic.json
+dataset_holistic.json
+dataset_dynamic_v2.json
+dataset_holistic.backup.json
+*.backup.json
+standalone_recorder.html
+scripts/

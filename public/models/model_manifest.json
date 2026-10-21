@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 4,
+  "version": "hybrid-v2-1792526345-73067",
+  "staticModel": "static_mlp/model.json",
+  "staticMetadata": "static_mlp/metadata.json",
+  "staticModelBytes": 25656,
+  "staticParameters": 17961,
+  "dynamicModel": "dynamic_gru/model.json",
+  "dynamicMetadata": "dynamic_gru/metadata.json",
+  "dynamicModelBytes": 47411,
+  "dynamicParameters": 35012,
+  "weightQuantization": "uint8"
+}

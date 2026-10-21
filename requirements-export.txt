@@ -1,0 +1,4 @@
+# Install with --no-deps after requirements-training.txt on Windows/Python 3.13.
+# The optional TF Decision Forests dependency has no compatible wheel and is
+# not used by SignSync's Keras LayersModel exporter.
+tensorflowjs==4.22.0
