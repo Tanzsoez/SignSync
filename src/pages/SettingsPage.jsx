@@ -17,6 +17,9 @@ export default function SettingsPage() {
     () => localStorage.getItem('signsync_dialect') || localStorage.getItem('signsync_lang') || 'ASL'
   );
   const [theme, setTheme] = useState(() => localStorage.getItem('signsync_theme') || 'dark');
+  const [performanceMode, setPerformanceMode] = useState(
+    () => localStorage.getItem('signsync_performance_mode') || 'auto'
+  );
   const [isCheckingPermissions, setIsCheckingPermissions] = useState(false);
   const [statusNotification, setStatusNotification] = useState(null);
 
@@ -75,6 +78,13 @@ export default function SettingsPage() {
     localStorage.setItem('signsync_theme', newTheme);
     document.documentElement.setAttribute('data-theme', newTheme);
     showNotification(`Theme updated to ${newTheme === 'dark' ? 'Dark Mode' : 'Light Mode'}`);
+  };
+
+  const handlePerformanceModeChange = (mode) => {
+    setPerformanceMode(mode);
+    localStorage.setItem('signsync_performance_mode', mode);
+    window.dispatchEvent(new Event('signsync_performance_mode_change'));
+    showNotification('Camera performance mode saved. Restart the camera to apply it.');
   };
 
   const showNotification = (msg) => {
@@ -332,7 +342,35 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* 4. Section 03: Visual Appearance & Theme */}
+      <section
+        style={{ padding: '2.5rem 0', borderBottom: '1px solid var(--glass-border)' }}
+      >
+        <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '0.65rem' }}>
+          Camera Performance
+        </h2>
+        <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+          Auto measures live processing speed. Performance mode lowers camera workload on older phones; Accuracy mode uses the highest pose model on capable devices.
+        </p>
+        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '1rem' }}>
+          {[
+            ['auto', 'Auto (Recommended)'],
+            ['performance', 'Performance'],
+            ['quality', 'Accuracy'],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`btn ${performanceMode === value ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => handlePerformanceModeChange(value)}
+              aria-pressed={performanceMode === value}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {/* Visual Appearance & Theme */}
       <section
         style={{
           display: 'grid',

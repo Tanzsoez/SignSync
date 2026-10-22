@@ -8,6 +8,8 @@
     "build": "vite build",
     "lint": "oxlint",
     "test": "node --test scripts/test_hybrid_models.mjs",
+    "test:bundle-budget": "node scripts/check_bundle_budget.mjs",
+    "verify": "npm run lint && npm test && npm run build && npm run test:bundle-budget",
     "preview": "vite preview",
     "record-holistic": "start standalone_recorder.html",
     "audit-holistic": "python scripts/audit_holistic_dataset.py --strict",

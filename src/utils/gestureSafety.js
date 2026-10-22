@@ -38,21 +38,35 @@ export const isIsolatedMiddleFingerGesture = (hand) => {
 };
 
 export class GestureRejectionGate {
-  constructor(requiredFrames = 6, releaseFrames = 3) {
+  constructor(requiredFrames = 6, releaseFrames = 3, nominalFrameMs = 1000 / 30) {
     this.requiredFrames = requiredFrames;
     this.releaseFrames = releaseFrames;
+    this.nominalFrameMs = nominalFrameMs;
+    this.requiredMs = requiredFrames * nominalFrameMs;
+    this.releaseMs = releaseFrames * nominalFrameMs;
     this.reset();
   }
 
-  update(isRejectedCandidate) {
+  update(isRejectedCandidate, timestamp) {
+    const now = Number.isFinite(timestamp)
+      ? timestamp
+      : (this.lastTimestamp ?? 0) + this.nominalFrameMs;
+    const elapsed = this.lastTimestamp == null
+      ? this.nominalFrameMs
+      : Math.max(1, now - this.lastTimestamp);
+    this.lastTimestamp = now;
     if (isRejectedCandidate) {
       this.candidateFrames += 1;
       this.clearFrames = 0;
-      if (this.candidateFrames >= this.requiredFrames) this.rejected = true;
+      this.candidateMs += elapsed;
+      this.clearMs = 0;
+      if (this.candidateMs >= this.requiredMs) this.rejected = true;
     } else {
       this.candidateFrames = 0;
       this.clearFrames += 1;
-      if (this.clearFrames >= this.releaseFrames) this.rejected = false;
+      this.candidateMs = 0;
+      this.clearMs += elapsed;
+      if (this.clearMs >= this.releaseMs) this.rejected = false;
     }
     return this.rejected;
   }
@@ -60,6 +74,9 @@ export class GestureRejectionGate {
   reset() {
     this.candidateFrames = 0;
     this.clearFrames = 0;
+    this.candidateMs = 0;
+    this.clearMs = 0;
+    this.lastTimestamp = null;
     this.rejected = false;
   }
 }

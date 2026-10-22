@@ -66,6 +66,35 @@ function averageRows(values, rowCount, columns) {
   return averaged;
 }
 
+export function resampleTimedFrames(frames, timestamps, targetLength = SEQUENCE_LENGTH) {
+  if (!frames?.length || targetLength < 1) return [];
+  if (!timestamps || timestamps.length !== frames.length || frames.length === 1) {
+    return Array.from({ length: targetLength }, (_, target) => {
+      const position = frames.length === 1 ? 0 : (target * (frames.length - 1)) / (targetLength - 1 || 1);
+      const low = Math.floor(position);
+      const high = Math.min(frames.length - 1, low + 1);
+      const blend = position - low;
+      return Float32Array.from(frames[low], (value, feature) => (
+        value * (1 - blend) + frames[high][feature] * blend
+      ));
+    });
+  }
+
+  const start = timestamps[0];
+  const end = Math.max(start + 1, timestamps[timestamps.length - 1]);
+  let high = 1;
+  return Array.from({ length: targetLength }, (_, target) => {
+    const targetTime = start + ((end - start) * target) / (targetLength - 1 || 1);
+    while (high < timestamps.length - 1 && timestamps[high] < targetTime) high += 1;
+    const low = Math.max(0, high - 1);
+    const span = Math.max(1, timestamps[high] - timestamps[low]);
+    const blend = Math.min(1, Math.max(0, (targetTime - timestamps[low]) / span));
+    return Float32Array.from(frames[low], (value, feature) => (
+      value * (1 - blend) + frames[high][feature] * blend
+    ));
+  });
+}
+
 export class SequenceRingBuffer {
   constructor(capacity = SEQUENCE_LENGTH, featureCount = SEQUENCE_FEATURES) {
     this.capacity = capacity;

@@ -34,4 +34,7 @@ dataset_dynamic_v2.json
 dataset_holistic.backup.json
 *.backup.json
 standalone_recorder.html
-scripts/
+repomix-output.md
+scripts/*
+!scripts/test_hybrid_models.mjs
+!scripts/check_bundle_budget.mjs

@@ -5,6 +5,7 @@ import { DynamicGestureTracker, refineFingerspellingPrediction } from '../utils/
 import {
   predictDynamicSequence,
   predictStatic,
+  resampleTimedFrames,
   SequenceRingBuffer,
 } from '../utils/sequenceInference';
 import { DynamicGestureSegmenter } from '../utils/dynamicGestureSegmenter';
@@ -15,51 +16,32 @@ import {
   selectActiveHandObjects,
 } from '../utils/holisticTracking';
 import { cameraConstraints, getRuntimeProfile } from '../utils/runtimeProfile';
+import {
+  AdaptiveInferenceController,
+  cancelVideoFrame,
+  RuntimeDiagnostics,
+  scheduleVideoFrame,
+} from '../utils/cameraRuntime';
 import { GestureRejectionGate, isIsolatedMiddleFingerGesture } from '../utils/gestureSafety';
 import { createSignSequence } from '../utils/textToSign';
+import RuntimeDiagnosticsPanel from '../components/RuntimeDiagnosticsPanel';
+import { dist3D, extractFeatures72 } from '../utils/landmarkFeatures';
 
 const DYNAMIC_HOLD_MS = 900;
+const STATIC_CONFIRM_MS = 90;
+const STATIC_SWITCH_MS = 260;
+const STATIC_HIGH_CONFIDENCE_SWITCH_MS = 140;
+const AMBIGUOUS_CANDIDATE_RESET_MS = 180;
+const AMBIGUOUS_RELEASE_MS = 600;
+const NO_HAND_RELEASE_MS = 220;
 const TRANSLATOR_GUIDANCE_SESSION_KEY = 'signsync_translator_guidance_seen';
 const Hand3D = lazy(() => import('../components/Hand3D'));
+const INITIAL_RUNTIME_PROFILE = getRuntimeProfile();
 
 import { DATASET_CATALOG, getCatalogDisplay, getCatalogSpokenText } from '../data/signCatalog';
 
 const getHumanReadableSign = getCatalogDisplay;
 const getSpokenSignText = getCatalogSpokenText;
-
-const dist3D = (p1, p2) => Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow((p1.z || 0) - (p2.z || 0), 2));
-
-const extractFeatures72 = (pts) => {
-  if (!pts || pts.length < 21) return null;
-  const wrist = pts[0];
-  const palmScale = dist3D(wrist, pts[9]) || 1.0;
-
-  const liveFeatures = [];
-  for (let i = 1; i <= 20; i++) {
-    liveFeatures.push(
-      Number(((pts[i].x - wrist.x) / palmScale).toFixed(4)),
-      Number(((pts[i].y - wrist.y) / palmScale).toFixed(4)),
-      Number((((pts[i].z || 0) - (wrist.z || 0)) / palmScale).toFixed(4))
-    );
-  }
-
-  liveFeatures.push(
-    Number((dist3D(pts[4], pts[8]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[12]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[16]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[20]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[8], pts[12]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[12], pts[16]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[16], pts[20]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[5]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[6]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[10]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[14]) / palmScale).toFixed(4)),
-    Number((dist3D(pts[4], pts[18]) / palmScale).toFixed(4))
-  );
-
-  return liveFeatures.length === 72 ? liveFeatures : null;
-};
 
 const extractDynamicFeaturesV2 = (rightHand, leftHand, pose) => {
   if (!pose?.[11] || !pose?.[12] || (!rightHand && !leftHand)) return null;
@@ -202,7 +184,12 @@ export default function TranslatorPage() {
   const holisticStabilizerRef = useRef(new HolisticTrackingStabilizer());
   const lastHolisticTimeRef = useRef(0);
   const lastDisplayFrameRef = useRef(0);
-  const runtimeProfileRef = useRef(getRuntimeProfile());
+  const runtimeProfileRef = useRef(INITIAL_RUNTIME_PROFILE);
+  const adaptiveInferenceRef = useRef(new AdaptiveInferenceController(INITIAL_RUNTIME_PROFILE));
+  const runtimeDiagnosticsRef = useRef(new RuntimeDiagnostics('translator', INITIAL_RUNTIME_PROFILE));
+  const holisticStartedAtRef = useRef(0);
+  const holisticCaptureAtRef = useRef(0);
+  const lastDiagnosticsPublishRef = useRef(0);
   const pageVisibleRef = useRef(!document.hidden);
   const lastDetectedSignRef = useRef('NONE');
   const languageRef = useRef(language);
@@ -213,10 +200,10 @@ export default function TranslatorPage() {
   const dynamicHoldUntilRef = useRef(0);
   const lastSpokenSignRef = useRef('NONE');
   const consecutiveCandidateRef = useRef(null);
-  const consecutiveCandidateCountRef = useRef(0);
+  const consecutiveCandidateSinceRef = useRef(0);
   const lastProcessedStaticPredictionRef = useRef(0);
-  const noHandFramesRef = useRef(0);
-  const ambiguousFramesRef = useRef(0);
+  const noHandSinceRef = useRef(0);
+  const ambiguousSinceRef = useRef(0);
   const dynamicTrackerRef = useRef(new DynamicGestureTracker());
   const dynamicSegmenterRef = useRef(new DynamicGestureSegmenter());
   const sequencePredictionRef = useRef(null);
@@ -239,10 +226,10 @@ export default function TranslatorPage() {
     dynamicHoldUntilRef.current = 0;
     lastSpokenSignRef.current = 'NONE';
     consecutiveCandidateRef.current = null;
-    consecutiveCandidateCountRef.current = 0;
+    consecutiveCandidateSinceRef.current = 0;
     lastProcessedStaticPredictionRef.current = 0;
-    noHandFramesRef.current = 0;
-    ambiguousFramesRef.current = 0;
+    noHandSinceRef.current = 0;
+    ambiguousSinceRef.current = 0;
     lastDetectedSignRef.current = 'NONE';
     setIsSignLocked(false);
     sequencePredictionRef.current = null;
@@ -267,9 +254,10 @@ export default function TranslatorPage() {
     dynamicHoldUntilRef.current = 0;
     lastSpokenSignRef.current = 'NONE';
     consecutiveCandidateRef.current = null;
-    consecutiveCandidateCountRef.current = 0;
+    consecutiveCandidateSinceRef.current = 0;
     lastProcessedStaticPredictionRef.current = 0;
-    ambiguousFramesRef.current = 0;
+    ambiguousSinceRef.current = 0;
+    noHandSinceRef.current = 0;
     lastDetectedSignRef.current = 'NONE';
     setIsSignLocked(false);
     sequencePredictionRef.current = null;
@@ -309,9 +297,11 @@ export default function TranslatorPage() {
 
     lastSequenceInferenceRef.current = nowInMs;
     sequenceInferenceBusyRef.current = true;
+    const inferenceStartedAt = performance.now();
     const generation = inferenceGenerationRef.current;
     predictStatic({ model: staticModel, metadata: staticMetadata, features, dialect })
       .then((prediction) => {
+        runtimeDiagnosticsRef.current.recordPrediction(prediction, 'static');
         if (generation === inferenceGenerationRef.current) {
           sequencePredictionRef.current = prediction
             ? { ...prediction, timestamp: performance.now() }
@@ -322,25 +312,28 @@ export default function TranslatorPage() {
         console.warn('[SignSync] Static inference failed:', error);
       })
       .finally(() => {
+        runtimeDiagnosticsRef.current.recordModelLatency(performance.now() - inferenceStartedAt);
         sequenceInferenceBusyRef.current = false;
       });
   };
 
-  const scheduleDynamicInference = (frames, dialect) => {
+  const scheduleDynamicInference = (frames, dialect, timestamps = null) => {
     if (
       !dynamicModel || !dynamicMetadata || sequenceInferenceBusyRef.current ||
       dynamicAwaitingResultRef.current || !frames?.length
     ) return false;
     const completedSequence = new SequenceRingBuffer();
-    frames.forEach((frame) => completedSequence.push(frame));
+    resampleTimedFrames(frames, timestamps).forEach((frame) => completedSequence.push(frame));
     sequenceInferenceBusyRef.current = true;
     dynamicAwaitingResultRef.current = true;
     dynamicPredictionReadyRef.current = false;
+    const inferenceStartedAt = performance.now();
     const generation = inferenceGenerationRef.current;
     predictDynamicSequence({
       model: dynamicModel, metadata: dynamicMetadata,
       ringBuffer: completedSequence, dialect,
     }).then((prediction) => {
+      runtimeDiagnosticsRef.current.recordPrediction(prediction, 'dynamic');
       if (generation === inferenceGenerationRef.current) {
         dynamicPredictionRef.current = prediction
           ? { ...prediction, timestamp: performance.now() }
@@ -354,6 +347,7 @@ export default function TranslatorPage() {
         dynamicPredictionReadyRef.current = true;
       }
     }).finally(() => {
+      runtimeDiagnosticsRef.current.recordModelLatency(performance.now() - inferenceStartedAt);
       sequenceInferenceBusyRef.current = false;
       if (generation !== inferenceGenerationRef.current) {
         dynamicAwaitingResultRef.current = false;
@@ -377,19 +371,31 @@ export default function TranslatorPage() {
               locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/${file}`,
             });
 
-            const profile = runtimeProfileRef.current;
+            const profile = getRuntimeProfile();
+            runtimeProfileRef.current = profile;
+            adaptiveInferenceRef.current = new AdaptiveInferenceController(profile);
+            runtimeDiagnosticsRef.current = new RuntimeDiagnostics('translator', profile);
             holistic.setOptions({
-              modelComplexity: profile.lowPower ? 1 : 2,
+              modelComplexity: profile.holisticModelComplexity,
               smoothLandmarks: true,
               enableSegmentation: false,
               smoothSegmentation: false,
-              refineFaceLandmarks: true,
+              refineFaceLandmarks: profile.refineFaceLandmarks,
               minDetectionConfidence: 0.6,
               minTrackingConfidence: 0.55,
             });
 
             holistic.onResults((results) => {
-              latestHolisticResultsRef.current = holisticStabilizerRef.current.update(results, Date.now());
+              const completedAt = performance.now();
+              const latency = holisticStartedAtRef.current
+                ? completedAt - holisticStartedAtRef.current
+                : 0;
+              adaptiveInferenceRef.current.recordLatency(latency);
+              runtimeDiagnosticsRef.current.recordHolisticLatency(latency);
+              runtimeDiagnosticsRef.current.recordLandmarks(completedAt);
+              latestHolisticResultsRef.current = holisticStabilizerRef.current.update(
+                results, holisticCaptureAtRef.current || Date.now(),
+              );
             });
 
             holisticRef.current = holistic;
@@ -444,18 +450,32 @@ export default function TranslatorPage() {
         if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        runtimeDiagnosticsRef.current.recordVideo(video);
 
         // A bounded visual grace period prevents a slow inference callback from
         // blinking every marker off between frames without leaving a stuck pose.
-        if (!isFreshHolisticResult(latestHolisticResultsRef.current, nowInMs, 700)) {
+        if (!isFreshHolisticResult(
+          latestHolisticResultsRef.current,
+          nowInMs,
+          adaptiveInferenceRef.current.freshnessBudgetMs,
+        )) {
           latestHolisticResultsRef.current = null;
         }
 
         // Keep capture close to the recording cadence. Dynamic inference now runs
         // once per completed gesture, so it no longer competes with every frame.
-        if (holisticRef.current && !isProcessingFrameRef.current && (nowInMs - lastHolisticTimeRef.current > profile.inferenceIntervalMs)) {
+        const adaptiveInterval = adaptiveInferenceRef.current.inferenceIntervalMs;
+        if (
+          holisticRef.current && isProcessingFrameRef.current &&
+          nowInMs - lastHolisticTimeRef.current > adaptiveInterval
+        ) {
+          runtimeDiagnosticsRef.current.recordDroppedSubmission();
+        }
+        if (holisticRef.current && !isProcessingFrameRef.current && (nowInMs - lastHolisticTimeRef.current > adaptiveInterval)) {
           isProcessingFrameRef.current = true;
           lastHolisticTimeRef.current = nowInMs;
+          holisticStartedAtRef.current = performance.now();
+          holisticCaptureAtRef.current = nowInMs;
           try {
             holisticRef.current.send({ image: video }).catch(() => { }).finally(() => {
               isProcessingFrameRef.current = false;
@@ -491,7 +511,7 @@ export default function TranslatorPage() {
             const containsRejectedGesture = detectedHandObjects.some(({ landmarks }) => (
               isIsolatedMiddleFingerGesture(landmarks)
             ));
-            gestureRejectionGateRef.current.update(containsRejectedGesture);
+            gestureRejectionGateRef.current.update(containsRejectedGesture, safetyTimestamp);
           }
 
           if (gestureRejectionGateRef.current.rejected) {
@@ -499,7 +519,7 @@ export default function TranslatorPage() {
             lockedScoreRef.current = 0;
             dynamicHoldUntilRef.current = 0;
             consecutiveCandidateRef.current = null;
-            consecutiveCandidateCountRef.current = 0;
+            consecutiveCandidateSinceRef.current = 0;
             sequencePredictionRef.current = null;
             dynamicPredictionRef.current = null;
             dynamicPredictionReadyRef.current = false;
@@ -521,7 +541,7 @@ export default function TranslatorPage() {
             setHandPostureStatus('Gesture cleared — ready for a trained sign');
           }
 
-          noHandFramesRef.current = 0;
+          noHandSinceRef.current = 0;
           noHandFinishAttemptedRef.current = false;
           const currentLang = languageRef.current || 'ASL';
 
@@ -544,8 +564,6 @@ export default function TranslatorPage() {
             inferenceGenerationRef.current += 1;
           }
           if (currentSingleSide) dominantHandSideRef.current = currentSingleSide;
-          dynamicTrackerRef.current.pushFrame(primaryHand, secondHand, poseLandmarks, isLeft);
-
           // Update the fixed-size rolling sequence at camera cadence. Inference is
           // asynchronous and never waits for a separate 60-frame capture pass.
           const holisticTimestamp = holisticRes?._timestamp || 0;
@@ -555,6 +573,9 @@ export default function TranslatorPage() {
           ) {
             lastQueuedHolisticTimestampRef.current = holisticTimestamp;
             lastQueuePushTimeRef.current = nowInMs;
+            dynamicTrackerRef.current.pushFrame(
+              primaryHand, secondHand, poseLandmarks, isLeft, holisticTimestamp || nowInMs,
+            );
             const primaryFeats = extractFeatures72(primaryHand);
             if (primaryFeats) {
               const activeTip = primaryHand[8];
@@ -568,9 +589,9 @@ export default function TranslatorPage() {
               const inferenceMode = signModeRef.current || 'fingerspelling';
               if (inferenceMode === 'phrases' && v2Features) {
                 if (!dynamicAwaitingResultRef.current) {
-                  const segmentEvent = dynamicSegmenterRef.current.push(v2Features);
+                  const segmentEvent = dynamicSegmenterRef.current.push(v2Features, holisticTimestamp);
                   if (segmentEvent?.type === 'completed') {
-                    scheduleDynamicInference(segmentEvent.frames, currentLang);
+                    scheduleDynamicInference(segmentEvent.frames, currentLang, segmentEvent.timestamps);
                   }
                 }
               } else if (inferenceMode === 'fingerspelling') {
@@ -646,8 +667,8 @@ export default function TranslatorPage() {
             dynamicHoldUntilRef.current = nowInMs + DYNAMIC_HOLD_MS;
             dynamicTrackerRef.current.reset();
             consecutiveCandidateRef.current = null;
-            consecutiveCandidateCountRef.current = 0;
-            ambiguousFramesRef.current = 0;
+            consecutiveCandidateSinceRef.current = 0;
+            ambiguousSinceRef.current = 0;
             dynamicPredictionRef.current = null;
             dynamicPredictionReadyRef.current = false;
             dynamicAwaitingResultRef.current = false;
@@ -673,33 +694,33 @@ export default function TranslatorPage() {
           }
           // CASE C: STATIC SIGN RECOGNITION (same GRU, static-label filtered)
           else if (currentMode === 'fingerspelling' && staticResult && staticResult.score >= 45) {
-            ambiguousFramesRef.current = 0;
+            ambiguousSinceRef.current = 0;
             const currentPredSign = staticResult.sign;
             const currentPredScore = staticResult.score;
             const isNewPrediction =
               staticResult.timestamp !== lastProcessedStaticPredictionRef.current;
 
-            // Track consecutive candidate frame streak for jitter-free confirmation
+            // Track elapsed candidate time so confirmation is independent of FPS.
             if (isNewPrediction) {
               lastProcessedStaticPredictionRef.current = staticResult.timestamp;
-              if (currentPredSign === consecutiveCandidateRef.current) {
-                consecutiveCandidateCountRef.current += 1;
-              } else {
+              if (currentPredSign !== consecutiveCandidateRef.current) {
                 consecutiveCandidateRef.current = currentPredSign;
-                consecutiveCandidateCountRef.current = 1;
+                consecutiveCandidateSinceRef.current = nowInMs;
               }
             }
 
-            const streak = consecutiveCandidateCountRef.current;
+            const candidateHeldMs = consecutiveCandidateSinceRef.current
+              ? nowInMs - consecutiveCandidateSinceRef.current
+              : 0;
 
             // CASE C1: No sign currently locked
             if (lockedSignRef.current === 'NONE') {
               // Require independent model updates; render frames must not count
               // as repeated evidence for the same prediction.
-              if (isNewPrediction && streak >= Number(staticMetadata?.thresholds?.confirmationPredictions || 2)) {
+              if (isNewPrediction && candidateHeldMs >= STATIC_CONFIRM_MS) {
                 lockedSignRef.current = currentPredSign;
                 lockedScoreRef.current = currentPredScore;
-                consecutiveCandidateCountRef.current = 0;
+                consecutiveCandidateSinceRef.current = 0;
                 setIsSignLocked(true);
 
                 lastDetectedSignRef.current = currentPredSign;
@@ -721,25 +742,25 @@ export default function TranslatorPage() {
             // CASE C2: Sign already locked (Strong Anti-Fluctuation Hysteresis)
             else {
               if (currentPredSign === lockedSignRef.current) {
-                lockedScoreRef.current = Math.round(0.85 * lockedScoreRef.current + 0.15 * currentPredScore);
+                if (isNewPrediction) {
+                  lockedScoreRef.current = Math.round(0.85 * lockedScoreRef.current + 0.15 * currentPredScore);
+                  setConfidence(lockedScoreRef.current);
+                }
                 consecutiveCandidateRef.current = null;
-                consecutiveCandidateCountRef.current = 0;
+                consecutiveCandidateSinceRef.current = 0;
 
-                setConfidence(lockedScoreRef.current);
                 setIsSignLocked(true);
                 const formattedSign = getHumanReadableSign(lockedSignRef.current, currentLang);
                 setHandPostureStatus(`Holding '${formattedSign}' (Stable ${lockedScoreRef.current}%)`);
               } else {
-                // Firm hysteresis: To switch away from an already-locked sign,
-                // the user must deliberately hold the new sign for at least 5 frames (~160ms)
-                // or at least 3 consecutive frames with high confidence (>= 88%).
-                // Momentary twitches or 1-2 frame glitches are strictly ignored!
+                // Elapsed-time hysteresis behaves consistently at 15, 20, or 30 FPS.
                 const isDeliberateSwitch = isNewPrediction &&
-                  (streak >= 5 || (currentPredScore >= 88 && streak >= 3));
+                  (candidateHeldMs >= STATIC_SWITCH_MS ||
+                    (currentPredScore >= 88 && candidateHeldMs >= STATIC_HIGH_CONFIDENCE_SWITCH_MS));
                 if (isDeliberateSwitch) {
                   lockedSignRef.current = currentPredSign;
                   lockedScoreRef.current = currentPredScore;
-                  consecutiveCandidateCountRef.current = 0;
+                  consecutiveCandidateSinceRef.current = 0;
                   setIsSignLocked(true);
 
                   lastDetectedSignRef.current = currentPredSign;
@@ -771,18 +792,19 @@ export default function TranslatorPage() {
                 const segment = dynamicSegmenterRef.current.snapshot();
                 setHandPostureStatus(
                   segment.state === 'recording'
-                    ? `Recording dynamic sign... (${segment.frameCount}/60 frames)`
+                    ? `Recording dynamic sign... (${(segment.durationMs / 1000).toFixed(1)}s)`
                     : 'Hand in view - move naturally, then pause to translate'
                 );
               }
             } else {
-              ambiguousFramesRef.current += 1;
-              if (ambiguousFramesRef.current >= 4) {
+              if (!ambiguousSinceRef.current) ambiguousSinceRef.current = nowInMs;
+              const ambiguousForMs = nowInMs - ambiguousSinceRef.current;
+              if (ambiguousForMs >= AMBIGUOUS_CANDIDATE_RESET_MS) {
                 consecutiveCandidateRef.current = null;
-                consecutiveCandidateCountRef.current = 0;
+                consecutiveCandidateSinceRef.current = 0;
               }
 
-              if (ambiguousFramesRef.current >= 18) {
+              if (ambiguousForMs >= AMBIGUOUS_RELEASE_MS) {
                 if (lockedSignRef.current !== 'NONE') {
                   lockedSignRef.current = 'NONE';
                   lockedScoreRef.current = 0;
@@ -813,7 +835,7 @@ export default function TranslatorPage() {
               noHandFinishAttemptedRef.current = true;
               const completed = dynamicSegmenterRef.current.finish();
               if (completed?.type === 'completed') {
-                scheduleDynamicInference(completed.frames, currentLang);
+                scheduleDynamicInference(completed.frames, currentLang, completed.timestamps);
               }
             }
 
@@ -850,11 +872,11 @@ export default function TranslatorPage() {
             }
           }
 
-          noHandFramesRef.current += 1;
+          if (!noHandSinceRef.current) noHandSinceRef.current = nowInMs;
           consecutiveCandidateRef.current = null;
-          consecutiveCandidateCountRef.current = 0;
+          consecutiveCandidateSinceRef.current = 0;
           lastProcessedStaticPredictionRef.current = 0;
-          ambiguousFramesRef.current = 0;
+          ambiguousSinceRef.current = 0;
           dynamicTrackerRef.current.reset();
           dominantHandSideRef.current = null;
           if (currentMode === 'fingerspelling') {
@@ -862,11 +884,11 @@ export default function TranslatorPage() {
             inferenceGenerationRef.current += 1;
           }
 
-          // Grace period: require 6 frames (~200ms) of no hands before resetting internal latch
+          // Elapsed-time grace period before resetting the internal latch.
           // Note: Preserves translated text on screen so user can read what was signed!
           const isDynamicHoldActiveOnNoHand = nowInMs < dynamicHoldUntilRef.current;
           if (
-            noHandFramesRef.current >= 6 &&
+            nowInMs - noHandSinceRef.current >= NO_HAND_RELEASE_MS &&
             !isDynamicHoldActiveOnNoHand &&
             !dynamicAwaitingResultRef.current
           ) {
@@ -884,11 +906,16 @@ export default function TranslatorPage() {
           }
         }
       }
+      runtimeDiagnosticsRef.current.recordDisplay();
+      if (nowInMs - lastDiagnosticsPublishRef.current >= 2000) {
+        lastDiagnosticsPublishRef.current = nowInMs;
+        runtimeDiagnosticsRef.current.publish(adaptiveInferenceRef.current);
+      }
     } catch (frameErr) {
       console.warn('[SignSync] Frame processing exception:', frameErr);
     } finally {
       if (isCameraActiveRef.current) {
-        animFrameRef.current = requestAnimationFrame(processVideoFrame);
+        animFrameRef.current = scheduleVideoFrame(videoRef.current, processVideoFrame);
       }
     }
   };
@@ -907,7 +934,8 @@ export default function TranslatorPage() {
         mediaStreamRef.current = null;
       }
       if (animFrameRef.current) {
-        cancelAnimationFrame(animFrameRef.current);
+        cancelVideoFrame(videoRef.current, animFrameRef.current);
+        animFrameRef.current = null;
       }
       latestHolisticResultsRef.current = null;
       holisticStabilizerRef.current.reset();
@@ -917,8 +945,12 @@ export default function TranslatorPage() {
     } else {
       try {
         setHandPostureStatus('Accessing camera feed...');
+        const profile = getRuntimeProfile();
+        runtimeProfileRef.current = profile;
+        adaptiveInferenceRef.current = new AdaptiveInferenceController(profile);
+        runtimeDiagnosticsRef.current = new RuntimeDiagnostics('translator', profile);
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: cameraConstraints(runtimeProfileRef.current),
+          video: cameraConstraints(profile),
         });
         mediaStreamRef.current = stream;
         if (videoRef.current) {
@@ -928,7 +960,7 @@ export default function TranslatorPage() {
             setIsCameraActive(true);
             isCameraActiveRef.current = true;
             setHandPostureStatus('Tracking pose & dual hand keypoints in real time...');
-            processVideoFrame();
+            animFrameRef.current = scheduleVideoFrame(videoRef.current, processVideoFrame);
           };
         }
       } catch {
@@ -943,7 +975,7 @@ export default function TranslatorPage() {
     isCameraActiveRef.current = false;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (animFrameRef.current) cancelVideoFrame(videoRef.current, animFrameRef.current);
     animFrameRef.current = null;
     setIsCameraActive(false);
   }, [activeSubTab]);
@@ -1084,7 +1116,7 @@ export default function TranslatorPage() {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
       }
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (animFrameRef.current) cancelVideoFrame(videoRef.current, animFrameRef.current);
     };
   }, []);
 
@@ -1197,6 +1229,7 @@ export default function TranslatorPage() {
 
   return (
     <div className="fade-in responsive-page translator-page" style={{ maxWidth: '1040px', margin: '0 auto', padding: '1rem 0 3rem 0' }}>
+      <RuntimeDiagnosticsPanel source="translator" />
       {isGuidanceOpen && (() => {
         const supportedCatalogs = ['ASL', 'FSL'].map((dialect) => ({
           dialect,
@@ -1710,7 +1743,7 @@ export default function TranslatorPage() {
                     dynamicHoldUntilRef.current = 0;
                     lastSpokenSignRef.current = 'NONE';
                     consecutiveCandidateRef.current = null;
-                    consecutiveCandidateCountRef.current = 0;
+                    consecutiveCandidateSinceRef.current = 0;
                     lastProcessedStaticPredictionRef.current = 0;
                     sequencePredictionRef.current = null;
                     dynamicPredictionRef.current = null;

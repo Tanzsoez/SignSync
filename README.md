@@ -91,6 +91,7 @@ npm run dev
 npm run lint
 npm test
 npm run build
+npm run test:bundle-budget
 ```
 
 The tests verify sequence resampling, completion-based gesture segmentation,
@@ -99,3 +100,9 @@ held-out recordings and browser-style shortened/held sequence replay with the
 same ASL/FSL dialect filtering used by the app. Real webcam testing remains
 necessary because the recordings come from a limited number of users and
 environments.
+
+For mobile testing, deploy a preview and open
+`?diagnostics=1#translator`. Follow [MOBILE_VALIDATION.md](MOBILE_VALIDATION.md)
+for the device matrix, latency targets, accuracy recording, soak test, and
+release gate. Camera Performance mode can be selected in Settings; Auto is the
+default and adapts submission cadence from measured MediaPipe latency.

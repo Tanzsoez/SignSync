@@ -431,7 +431,8 @@ export function refineFingerspellingPrediction(candidate, score, pts, tracker = 
 export class DynamicGestureTracker {
   constructor() {
     this.history = []; // Sliding trajectory buffer
-    this.maxHistory = 32; // ~1 second of motion history
+    this.maxHistory = 48; // Safety bound; elapsed time controls the real window.
+    this.maxHistoryMs = 1200;
     this.lastTriggeredTime = 0;
     this.cooldownMs = 400; // Cooldown for live trajectory tracking
     this.currentTelemetry = {
@@ -450,13 +451,20 @@ export class DynamicGestureTracker {
     return this.currentTelemetry;
   }
 
+  recentWindow(durationMs, maximum = this.maxHistory) {
+    if (!this.history.length) return [];
+    const cutoff = this.history[this.history.length - 1].time - durationMs;
+    return this.history.filter(({ time }) => time >= cutoff).slice(-maximum);
+  }
+
   /**
    * Evaluates physical spatial movement of the wrist and palm.
    */
   hasSignificantMotion() {
     const n = this.history.length;
-    if (n < 6) return false;
-    const slice = this.history.slice(-14);
+    if (n < 4) return false;
+    const slice = this.recentWindow(700, 22);
+    if (slice.length < 4) return false;
     let totalPalmTravel = 0;
     let totalWristTravel = 0;
     let minX = 999, maxX = -999, minY = 999, maxY = -999;
@@ -486,8 +494,9 @@ export class DynamicGestureTracker {
    * being emitted as Z while remaining independent of signing hand.
    */
   detectFingerspellingMotion() {
-    if (this.history.length < 9) return null;
-    const recent = this.history.slice(-Math.min(28, this.history.length));
+    if (this.history.length < 4) return null;
+    const recent = this.recentWindow(1100, 36);
+    if (recent.length < 4 || recent.at(-1).time - recent[0].time < 220) return null;
     const pointingFrames = recent.filter(({ anat }) => anat?.isPointing).length;
     if (pointingFrames < Math.ceil(recent.length * 0.55)) return null;
 
@@ -517,13 +526,13 @@ export class DynamicGestureTracker {
   /**
    * Push a frame snapshot into the sliding buffer
    */
-  pushFrame(primaryHand, secondHand = null, pose = null, isLeft = false) {
+  pushFrame(primaryHand, secondHand = null, pose = null, isLeft = false, timestamp = Date.now()) {
     if (!primaryHand || primaryHand.length < 21) {
       if (this.history.length > 0) this.history.shift();
       return;
     }
 
-    const now = Date.now();
+    const now = Number.isFinite(timestamp) ? timestamp : Date.now();
     const wrist = primaryHand[0];
     const indexTip = primaryHand[8];
     const middleTip = primaryHand[12];
@@ -605,6 +614,9 @@ export class DynamicGestureTracker {
     };
 
     this.history.push(snapshot);
+    while (this.history.length > 1 && this.history[0].time < now - this.maxHistoryMs) {
+      this.history.shift();
+    }
     if (this.history.length > this.maxHistory) {
       this.history.shift();
     }
@@ -615,7 +627,10 @@ export class DynamicGestureTracker {
       bodyAnchor: nearestAnchor,
       motionState: this.hasSignificantMotion() ? 'In Motion' : 'Steady',
       motionVelocity: this.history.length > 2
-        ? Number((dist2D(palmCenter, this.history[this.history.length - 2].palmCenter) * 100).toFixed(1))
+        ? Number((
+          dist2D(palmCenter, this.history[this.history.length - 2].palmCenter) * 1000 /
+          Math.max(1, now - this.history[this.history.length - 2].time)
+        ).toFixed(2))
         : 0,
     };
   }
@@ -672,16 +687,17 @@ export class DynamicGestureTracker {
    */
   evaluate(dialect = 'ASL', staticCandidate = null) {
     const n = this.history.length;
-    if (n < 6) return null;
+    if (n < 4) return null;
 
-    const now = Date.now();
+    const now = this.history[n - 1].time;
     if (now - this.lastTriggeredTime < this.cooldownMs) {
       return null;
     }
 
     const isFSL = dialect.toUpperCase() === 'FSL';
     const latest = this.history[n - 1];
-    const recent = this.history.slice(-Math.min(n, 20));
+    const recent = this.recentWindow(850, 30);
+    if (recent.length < 4) return null;
 
     // Direction reversals in X and Y
     let xReversals = 0, yReversals = 0;

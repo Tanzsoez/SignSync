@@ -27,6 +27,16 @@ import {
   selectActiveHandObjects,
 } from '../utils/holisticTracking';
 import { cameraConstraints, getRuntimeProfile } from '../utils/runtimeProfile';
+import RuntimeDiagnosticsPanel from '../components/RuntimeDiagnosticsPanel';
+import { extractFeatures72 } from '../utils/landmarkFeatures';
+import {
+  AdaptiveInferenceController,
+  cancelVideoFrame,
+  RuntimeDiagnostics,
+  scheduleVideoFrame,
+} from '../utils/cameraRuntime';
+
+const INITIAL_RUNTIME_PROFILE = getRuntimeProfile();
 
 export default function LearningCenterPage() {
   const { staticModel, staticMetadata } = useModel();
@@ -90,7 +100,13 @@ export default function LearningCenterPage() {
   const lastQueuedHolisticTimestampRef = useRef(0);
   const practiceCameraPanelRef = useRef(null);
   const mediaStreamRef = useRef(null);
-  const runtimeProfileRef = useRef(getRuntimeProfile());
+  const runtimeProfileRef = useRef(INITIAL_RUNTIME_PROFILE);
+  const adaptiveInferenceRef = useRef(new AdaptiveInferenceController(INITIAL_RUNTIME_PROFILE));
+  const runtimeDiagnosticsRef = useRef(new RuntimeDiagnostics('learning', INITIAL_RUNTIME_PROFILE));
+  const holisticStartedAtRef = useRef(0);
+  const holisticCaptureAtRef = useRef(0);
+  const lastHolisticSubmitRef = useRef(0);
+  const lastDiagnosticsPublishRef = useRef(0);
   const lastDisplayFrameRef = useRef(0);
   const pageVisibleRef = useRef(!document.hidden);
 
@@ -115,19 +131,31 @@ export default function LearningCenterPage() {
           const holistic = new window.Holistic({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/${file}`,
           });
-          const profile = runtimeProfileRef.current;
+          const profile = getRuntimeProfile();
+          runtimeProfileRef.current = profile;
+          adaptiveInferenceRef.current = new AdaptiveInferenceController(profile);
+          runtimeDiagnosticsRef.current = new RuntimeDiagnostics('learning', profile);
           holistic.setOptions({
-            modelComplexity: profile.lowPower ? 1 : 2,
+            modelComplexity: profile.holisticModelComplexity,
             smoothLandmarks: true,
             enableSegmentation: false,
             smoothSegmentation: false,
-            refineFaceLandmarks: true,
+            refineFaceLandmarks: profile.refineFaceLandmarks,
             minDetectionConfidence: 0.6,
             minTrackingConfidence: 0.55,
           });
           holistic.onResults((results) => {
             if (results) {
-              latestHolisticResultsRef.current = holisticStabilizerRef.current.update(results, Date.now());
+              const completedAt = performance.now();
+              const latency = holisticStartedAtRef.current
+                ? completedAt - holisticStartedAtRef.current
+                : 0;
+              adaptiveInferenceRef.current.recordLatency(latency);
+              runtimeDiagnosticsRef.current.recordHolisticLatency(latency);
+              runtimeDiagnosticsRef.current.recordLandmarks(completedAt);
+              latestHolisticResultsRef.current = holisticStabilizerRef.current.update(
+                results, holisticCaptureAtRef.current || Date.now(),
+              );
             }
           });
           holisticRef.current = holistic;
@@ -155,7 +183,7 @@ export default function LearningCenterPage() {
 
   useEffect(() => () => {
     isCameraLoopActiveRef.current = false;
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (animFrameRef.current) cancelVideoFrame(videoRef.current, animFrameRef.current);
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
   }, []);
@@ -271,8 +299,12 @@ export default function LearningCenterPage() {
     setCameraError(null);
     try {
       if (mediaStreamRef.current) return;
+      const profile = getRuntimeProfile();
+      runtimeProfileRef.current = profile;
+      adaptiveInferenceRef.current = new AdaptiveInferenceController(profile);
+      runtimeDiagnosticsRef.current = new RuntimeDiagnostics('learning', profile);
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: cameraConstraints(runtimeProfileRef.current),
+        video: cameraConstraints(profile),
       });
       mediaStreamRef.current = stream;
       if (videoRef.current) {
@@ -294,7 +326,7 @@ export default function LearningCenterPage() {
     isCameraLoopActiveRef.current = false;
     isProcessingHolisticRef.current = false;
     if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current);
+      cancelVideoFrame(videoRef.current, animFrameRef.current);
       animFrameRef.current = null;
     }
     if (videoRef.current && videoRef.current.srcObject) {
@@ -311,48 +343,16 @@ export default function LearningCenterPage() {
     inferenceGenerationRef.current += 1;
   };
 
-  const extractFeatures72 = (pts) => {
-    if (!pts || pts.length < 21) return null;
-    const dist3D = (left, right) => Math.sqrt(
-      Math.pow(left.x - right.x, 2) +
-      Math.pow(left.y - right.y, 2) +
-      Math.pow((left.z || 0) - (right.z || 0), 2)
-    );
-    const wrist = pts[0];
-    const palmScale = dist3D(wrist, pts[9]) || 1;
-    const features = [];
-    for (let index = 1; index <= 20; index += 1) {
-      features.push(
-        (pts[index].x - wrist.x) / palmScale,
-        (pts[index].y - wrist.y) / palmScale,
-        ((pts[index].z || 0) - (wrist.z || 0)) / palmScale
-      );
-    }
-    features.push(
-      dist3D(pts[4], pts[8]) / palmScale,
-      dist3D(pts[4], pts[12]) / palmScale,
-      dist3D(pts[4], pts[16]) / palmScale,
-      dist3D(pts[4], pts[20]) / palmScale,
-      dist3D(pts[8], pts[12]) / palmScale,
-      dist3D(pts[12], pts[16]) / palmScale,
-      dist3D(pts[16], pts[20]) / palmScale,
-      dist3D(pts[4], pts[5]) / palmScale,
-      dist3D(pts[4], pts[6]) / palmScale,
-      dist3D(pts[4], pts[10]) / palmScale,
-      dist3D(pts[4], pts[14]) / palmScale,
-      dist3D(pts[4], pts[18]) / palmScale
-    );
-    return features.length === 72 ? features : null;
-  };
-
   const schedulePracticeInference = (features, dialect, nowInMs) => {
     if (!staticModel || !staticMetadata || sequenceInferenceBusyRef.current) return;
     if (nowInMs - lastSequenceInferenceRef.current < 65) return;
     lastSequenceInferenceRef.current = nowInMs;
     sequenceInferenceBusyRef.current = true;
+    const inferenceStartedAt = performance.now();
     const generation = inferenceGenerationRef.current;
     predictStatic({ model: staticModel, metadata: staticMetadata, features, dialect })
       .then((prediction) => {
+        runtimeDiagnosticsRef.current.recordPrediction(prediction, 'practice');
         if (generation === inferenceGenerationRef.current) {
           sequencePredictionRef.current = prediction
             ? { ...prediction, timestamp: performance.now() }
@@ -361,6 +361,7 @@ export default function LearningCenterPage() {
       })
       .catch((error) => console.warn('[LearningCenter] GRU inference failed:', error))
       .finally(() => {
+        runtimeDiagnosticsRef.current.recordModelLatency(performance.now() - inferenceStartedAt);
         sequenceInferenceBusyRef.current = false;
       });
   };
@@ -407,15 +408,15 @@ export default function LearningCenterPage() {
   const runCameraDetectionLoop = () => {
     if (!isCameraLoopActiveRef.current) return;
 
+    const nowInMs = Date.now();
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const activeSign = activePracticeSignRef.current || activePracticeSign;
 
     if (video && canvas && video.readyState >= 2 && activeSign) {
-      const nowInMs = Date.now();
       const profile = runtimeProfileRef.current;
       if (!pageVisibleRef.current || nowInMs - lastDisplayFrameRef.current < profile.displayIntervalMs) {
-        animFrameRef.current = requestAnimationFrame(runCameraDetectionLoop);
+        animFrameRef.current = scheduleVideoFrame(video, runCameraDetectionLoop);
         return;
       }
       lastDisplayFrameRef.current = nowInMs;
@@ -425,14 +426,24 @@ export default function LearningCenterPage() {
       if (canvas.height !== videoHeight) canvas.height = videoHeight;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      runtimeDiagnosticsRef.current.recordVideo(video);
 
       // Send to Holistic at a device-appropriate cadence.
       if (
+        holisticRef.current && isProcessingHolisticRef.current &&
+        nowInMs - lastHolisticSubmitRef.current > adaptiveInferenceRef.current.inferenceIntervalMs
+      ) {
+        runtimeDiagnosticsRef.current.recordDroppedSubmission();
+      }
+      if (
         holisticRef.current &&
         !isProcessingHolisticRef.current &&
-        nowInMs - (latestHolisticResultsRef.current?._timestamp || 0) > profile.inferenceIntervalMs
+        nowInMs - lastHolisticSubmitRef.current > adaptiveInferenceRef.current.inferenceIntervalMs
       ) {
         isProcessingHolisticRef.current = true;
+        holisticStartedAtRef.current = performance.now();
+        holisticCaptureAtRef.current = nowInMs;
+        lastHolisticSubmitRef.current = nowInMs;
         try {
           holisticRef.current
             .send({ image: video })
@@ -446,11 +457,13 @@ export default function LearningCenterPage() {
       }
 
       let detectedHands = [];
-      if (isFreshHolisticResult(latestHolisticResultsRef.current, nowInMs, 700)) {
+      if (isFreshHolisticResult(
+        latestHolisticResultsRef.current,
+        nowInMs,
+        adaptiveInferenceRef.current.freshnessBudgetMs,
+      )) {
         const hRes = latestHolisticResultsRef.current;
-        if (nowInMs - (hRes._timestamp || 0) < 350) {
-          detectedHands = selectActiveHandObjects(hRes).map((hand) => hand.landmarks);
-        }
+        detectedHands = selectActiveHandObjects(hRes).map((hand) => hand.landmarks);
       }
 
       if (detectedHands.length > 0) {
@@ -545,7 +558,12 @@ export default function LearningCenterPage() {
     }
 
     if (isCameraLoopActiveRef.current) {
-      animFrameRef.current = requestAnimationFrame(runCameraDetectionLoop);
+      runtimeDiagnosticsRef.current.recordDisplay();
+      if (nowInMs - lastDiagnosticsPublishRef.current >= 2000) {
+        lastDiagnosticsPublishRef.current = nowInMs;
+        runtimeDiagnosticsRef.current.publish(adaptiveInferenceRef.current);
+      }
+      animFrameRef.current = scheduleVideoFrame(videoRef.current, runCameraDetectionLoop);
     }
   };
 
@@ -559,6 +577,7 @@ export default function LearningCenterPage() {
 
   return (
     <div className="fade-in responsive-page learning-page">
+      <RuntimeDiagnosticsPanel source="learning" />
       {/* Top Page Header */}
       <div className="page-header" style={{ marginBottom: '1.5rem' }}>
         <div className="responsive-header-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
