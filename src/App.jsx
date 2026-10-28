@@ -21,15 +21,14 @@ function AppContent() {
   const { loadModels, hasStartedLoading } = useModel();
 
   useEffect(() => {
-    if (activeTab !== 'translator' && activeTab !== 'learning') return undefined;
-    const startLoading = () => loadModels();
+    const startLoading = () => void loadModels().catch(() => {});
     if ('requestIdleCallback' in window) {
-      const idleId = window.requestIdleCallback(startLoading, { timeout: 350 });
+      const idleId = window.requestIdleCallback(startLoading, { timeout: 1200 });
       return () => window.cancelIdleCallback(idleId);
     }
-    const timer = window.setTimeout(startLoading, 50);
+    const timer = window.setTimeout(startLoading, 250);
     return () => window.clearTimeout(timer);
-  }, [activeTab, loadModels]);
+  }, [loadModels]);
 
   // Sync hash → state on browser back/forward
   useEffect(() => {

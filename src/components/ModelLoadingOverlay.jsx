@@ -18,10 +18,8 @@ export default function ModelLoadingOverlay() {
     loadingStage,
     loadingError,
     retryLoading,
-    skipLoading,
   } = useModel();
 
-  const [canSkip, setCanSkip] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
   const [isUnmounted, setIsUnmounted] = useState(false);
 
@@ -33,12 +31,6 @@ export default function ModelLoadingOverlay() {
       return () => clearTimeout(timer);
     }
   }, [isModelLoaded]);
-
-  // Show a "Skip to App" option after 4 seconds so the user is never trapped
-  useEffect(() => {
-    const timer = setTimeout(() => setCanSkip(true), 4000);
-    return () => clearTimeout(timer);
-  }, []);
 
   if (isUnmounted) return null;
 
@@ -85,15 +77,6 @@ export default function ModelLoadingOverlay() {
           AI models run entirely on your device. No video or data leaves your browser.
         </p>
 
-        {canSkip && !isModelLoaded && (
-          <button
-            type="button"
-            className="model-loading-skip-btn"
-            onClick={skipLoading}
-          >
-            Skip to App &rarr;
-          </button>
-        )}
       </div>
     </div>
   );

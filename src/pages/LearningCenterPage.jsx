@@ -17,9 +17,6 @@ import confetti from 'canvas-confetti';
 import { ALL_CURRICULUM_SIGNS } from '../data/curriculumData';
 import SignGraphic from '../components/SignGraphic';
 import { useModel } from '../contexts/ModelContext';
-import {
-  predictStatic,
-} from '../utils/sequenceInference';
 import { loadHolistic } from '../utils/loadHolistic';
 import {
   HolisticTrackingStabilizer,
@@ -35,11 +32,12 @@ import {
   RuntimeDiagnostics,
   scheduleVideoFrame,
 } from '../utils/cameraRuntime';
+import { drawCameraGuide, getHandPositionGuidance } from '../utils/cameraGuidance';
 
 const INITIAL_RUNTIME_PROFILE = getRuntimeProfile();
 
 export default function LearningCenterPage() {
-  const { staticModel, staticMetadata } = useModel();
+  const { isModelLoaded, predictStatic } = useModel();
 
   // Curriculum filter & search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -80,6 +78,7 @@ export default function LearningCenterPage() {
   const [detectedSignName, setDetectedSignName] = useState('None');
   const [detectionConfidence, setDetectionConfidence] = useState(0);
   const [holdProgress, setHoldProgress] = useState(0); // 0 to 100%
+  const [positioningGuidance, setPositioningGuidance] = useState({ level: 'waiting', message: 'Place your hand inside the guide' });
 
   // Webcam & Canvas Refs
   const videoRef = useRef(null);
@@ -344,13 +343,13 @@ export default function LearningCenterPage() {
   };
 
   const schedulePracticeInference = (features, dialect, nowInMs) => {
-    if (!staticModel || !staticMetadata || sequenceInferenceBusyRef.current) return;
+    if (!isModelLoaded || sequenceInferenceBusyRef.current) return;
     if (nowInMs - lastSequenceInferenceRef.current < 65) return;
     lastSequenceInferenceRef.current = nowInMs;
     sequenceInferenceBusyRef.current = true;
     const inferenceStartedAt = performance.now();
     const generation = inferenceGenerationRef.current;
-    predictStatic({ model: staticModel, metadata: staticMetadata, features, dialect })
+    predictStatic(features, dialect)
       .then((prediction) => {
         runtimeDiagnosticsRef.current.recordPrediction(prediction, 'practice');
         if (generation === inferenceGenerationRef.current) {
@@ -426,6 +425,7 @@ export default function LearningCenterPage() {
       if (canvas.height !== videoHeight) canvas.height = videoHeight;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawCameraGuide(ctx);
       runtimeDiagnosticsRef.current.recordVideo(video);
 
       // Send to Holistic at a device-appropriate cadence.
@@ -465,6 +465,10 @@ export default function LearningCenterPage() {
         const hRes = latestHolisticResultsRef.current;
         detectedHands = selectActiveHandObjects(hRes).map((hand) => hand.landmarks);
       }
+      const nextGuidance = getHandPositionGuidance(detectedHands);
+      setPositioningGuidance((current) => (
+        current.level === nextGuidance.level && current.message === nextGuidance.message ? current : nextGuidance
+      ));
 
       if (detectedHands.length > 0) {
         const handLandmarks = detectedHands[0];
@@ -591,24 +595,6 @@ export default function LearningCenterPage() {
             </p>
           </div>
           <div className="responsive-control-row" style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
-            <button
-              onClick={() => {
-                const allKeys = ALL_CURRICULUM_SIGNS.map((s) => s.signKey);
-                setCompletedLessons(allKeys);
-                localStorage.setItem('signsync_completed_lessons', JSON.stringify(allKeys));
-                confetti({
-                  particleCount: 80,
-                  spread: 70,
-                  origin: { y: 0.6 },
-                });
-              }}
-              className="btn btn-primary"
-              style={{ fontSize: '0.8rem', padding: '0.45rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-              title="Mark all signs as completed"
-            >
-              <CheckCircle className="w-3.5 h-3.5" />
-              Complete All Signs
-            </button>
             <button
               onClick={handleResetProgress}
               className="btn btn-outline"
@@ -928,6 +914,7 @@ export default function LearningCenterPage() {
                 }}
               >
                 <SignGraphic
+                  signKey={item.signKey}
                   symbol={item.symbol}
                   dialect={item.dialect}
                   handShape={item.handShape}
@@ -1066,6 +1053,7 @@ export default function LearningCenterPage() {
                 {/* Reference Anatomy Graphic */}
                 <div style={{ marginBottom: '0.85rem' }}>
                   <SignGraphic
+                    signKey={activePracticeSign.signKey}
                     symbol={activePracticeSign.symbol}
                     dialect={activePracticeSign.dialect}
                     handShape={activePracticeSign.handShape}
@@ -1131,7 +1119,7 @@ export default function LearningCenterPage() {
                   style={{
                     position: 'relative',
                     width: '100%',
-                    height: '210px',
+                    height: 'clamp(300px, 52vh, 520px)',
                     borderRadius: 'var(--radius-md)',
                     overflow: 'hidden',
                     background: '#090d16',
@@ -1187,6 +1175,11 @@ export default function LearningCenterPage() {
                       </button>
                     </div>
                   )}
+                </div>
+
+                <div className={`camera-guidance camera-guidance-${positioningGuidance.level}`} role="status" aria-live="polite">
+                  <span className="camera-guidance-dot" />
+                  {positioningGuidance.message}
                 </div>
 
                 {/* Real-Time Posture Hold Progress */}

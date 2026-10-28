@@ -40,8 +40,13 @@ right hands and does not rewrite unrelated predictions. Known look-alike
 families also require a wider confidence margin when no physical check resolves
 the ambiguity.
 
-Models and MediaPipe are loaded only after opening Translator or Learning
-Center. The 3D signer is loaded separately only when its view is opened.
+The static and dynamic TensorFlow models begin loading after the Home page's
+first render. A single dedicated Web Worker owns both warmed model instances,
+so Translator and Learning Center share the runtime without running TensorFlow
+on the rendering thread. Versioned service-worker caches keep the application
+shell and model packages available after the first successful load. MediaPipe
+assets used from jsDelivr are runtime-cached after their first successful use.
+The 3D signer is loaded separately only when its view is opened.
 For trained signs, the signer loads `public/models/avatar_poses.json`, a compact
 library of actual representative landmarks exported from the same static and
 dynamic recordings used by the classifiers. Handshape, handedness, spacing,
@@ -100,6 +105,13 @@ held-out recordings and browser-style shortened/held sequence replay with the
 same ASL/FSL dialect filtering used by the app. Real webcam testing remains
 necessary because the recordings come from a limited number of users and
 environments.
+
+Current internal results and their limitations are published in
+[MODEL_CARD.md](MODEL_CARD.md) and on the Home page. These figures are not an
+independent signer study. Learning Center photographs must be consented,
+licensed, and reviewed by Deaf ASL or FSL signers before being registered in
+`src/data/verifiedSignReferences.js`; existing vector artwork is labelled as an
+illustration pending photo review.
 
 For mobile testing, deploy a preview and open
 `?diagnostics=1#translator`. Follow [MOBILE_VALIDATION.md](MOBILE_VALIDATION.md)

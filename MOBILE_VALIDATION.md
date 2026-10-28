@@ -47,6 +47,16 @@ and reviewed before they are added to the training dataset.
 
 ## Release gate
 
+Before the performance suite, confirm that camera and microphone permission
+prompts work on the deployed origin. Exercise successful speech, no-speech,
+permission-denied, and offline/network-error paths in both English and Filipino
+where supported. Browser speech recognition may require a network connection.
+
+After one successful online Translator session, reload the installed app with
+the device offline. Confirm that the app shell, both recognition models, and
+previously downloaded MediaPipe assets load without the network. A first-ever
+offline visit is not supported.
+
 Run `npm run verify`, complete the physical-device matrix, and deploy first to
 a small Vercel Preview audience. Promote the exact tested build to production;
 roll back the deployment and model manifest if either latency or per-sign

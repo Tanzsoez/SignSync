@@ -1,0 +1,20 @@
+{
+  "modelVersion": "hybrid-v2-1792526345-73067",
+  "publishedAt": "2026-10-27",
+  "scope": "Internal held-out recordings; not an independent signer study",
+  "static": { "validationClips": 146, "accuracy": 1.0, "macroF1": 1.0, "inferenceP95MsTrainingMachine": 1.541 },
+  "dynamic": {
+    "validationClips": 88,
+    "accuracy": 0.9773,
+    "macroF1": 0.9758,
+    "timingRobustAccuracy": 0.9659,
+    "inferenceP95MsTrainingMachine": 85.097,
+    "knownLowAccuracyClasses": { "ASL_ME": 0.5, "FSL_AKO_AY_MABUTI": 0.5 }
+  },
+  "limitations": [
+    "Only two validation recordings per label",
+    "Recordings come from a limited signer population",
+    "Physical-device and independent Deaf signer validation is still required",
+    "Training-machine latency is not representative of every browser or phone"
+  ]
+}

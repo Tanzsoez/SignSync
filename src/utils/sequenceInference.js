@@ -1,5 +1,3 @@
-import * as tf from '@tensorflow/tfjs';
-
 export const SEQUENCE_LENGTH = 60;
 export const SEQUENCE_FEATURES = 168;
 
@@ -401,7 +399,7 @@ function acceptedPrediction(probabilities, metadata, engine, isDynamic, started,
   };
 }
 
-export async function predictStatic({ model, metadata, features, dialect }) {
+export async function predictStatic({ tf, model, metadata, features, dialect }) {
   if (!model || !metadata || !features || features.length !== 72) return null;
   const mean = metadata.normalization?.mean;
   const std = metadata.normalization?.std;
@@ -426,7 +424,7 @@ export async function predictStatic({ model, metadata, features, dialect }) {
   );
 }
 
-export async function predictDynamicSequence({ model, metadata, ringBuffer, dialect }) {
+export async function predictDynamicSequence({ tf, model, metadata, ringBuffer, dialect }) {
   if (!model || !metadata || !ringBuffer) return null;
   const raw = ringBuffer.toResampledInput();
   if (!raw) return null;

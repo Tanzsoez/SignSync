@@ -1,21 +1,12 @@
-import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import {
+  inferDynamic,
+  inferStatic,
+  loadRecognitionModels,
+  subscribeToModelRuntime,
+} from '../services/modelRuntime';
 
 const ModelContext = createContext(null);
-const MANIFEST_URL = '/models/model_manifest.json';
-
-async function fetchJSON(url, version) {
-  const response = await fetch(`${url}?modelVersion=${encodeURIComponent(version)}`, { cache: 'force-cache' });
-  if (!response.ok) throw new Error(`HTTP ${response.status} loading ${url}`);
-  return response.json();
-}
-
-async function loadLayersModel(tf, url, version, inputShape) {
-  const model = await tf.loadLayersModel(`${url}?modelVersion=${encodeURIComponent(version)}`);
-  const warmup = tf.tidy(() => model.predict(tf.zeros(inputShape, 'float32')));
-  if (Array.isArray(warmup)) warmup.forEach((tensor) => tensor.dispose());
-  else warmup.dispose();
-  return model;
-}
 
 export function useModel() {
   const context = useContext(ModelContext);
@@ -26,18 +17,48 @@ export function useModel() {
 export function ModelProvider({ children }) {
   const promiseRef = useRef(null);
   const [state, setState] = useState({
-    staticModel: null,
-    staticMetadata: null,
-    dynamicModel: null,
-    dynamicMetadata: null,
     hasStartedLoading: false,
     isModelLoaded: false,
     loadingProgress: 0,
     loadedBytes: 0,
     totalBytes: 0,
-    loadingStage: 'Recognition models are loaded only when needed.',
+    loadingStage: 'Recognition models are ready to download.',
     loadingError: null,
+    modelVersion: null,
+    backend: null,
   });
+
+  useEffect(() => subscribeToModelRuntime((message) => {
+    if (message.type === 'PROGRESS') {
+      setState((current) => ({
+        ...current,
+        hasStartedLoading: true,
+        loadingProgress: message.progress,
+        loadedBytes: message.loadedBytes,
+        totalBytes: message.totalBytes,
+        loadingStage: message.stage,
+        loadingError: null,
+      }));
+    } else if (message.type === 'READY') {
+      setState((current) => ({
+        ...current,
+        isModelLoaded: true,
+        loadingProgress: 100,
+        loadingStage: `Recognition ready on ${message.backend.toUpperCase()}`,
+        modelVersion: message.version,
+        backend: message.backend,
+        loadingError: null,
+      }));
+    } else if (message.type === 'LOAD_ERROR') {
+      setState((current) => ({
+        ...current,
+        isModelLoaded: false,
+        loadingError: message.error,
+        loadingStage: 'Recognition models failed to load',
+      }));
+      promiseRef.current = null;
+    }
+  }), []);
 
   const loadModels = useCallback(() => {
     if (promiseRef.current) return promiseRef.current;
@@ -46,49 +67,13 @@ export function ModelProvider({ children }) {
       hasStartedLoading: true,
       isModelLoaded: false,
       loadingError: null,
-      loadingProgress: 5,
-      loadingStage: 'Preparing on-device recognition...',
+      loadingStage: 'Starting recognition worker…',
     }));
-    promiseRef.current = (async () => {
-      try {
-        const [tf, manifest] = await Promise.all([
-          import('@tensorflow/tfjs'),
-          fetch(MANIFEST_URL, { cache: 'no-cache' }).then((response) => response.json()),
-        ]);
-        await tf.ready();
-        const version = String(manifest.version || 'hybrid-v2');
-        const totalBytes = Number(manifest.staticModelBytes || 0) + Number(manifest.dynamicModelBytes || 0);
-        setState((current) => ({ ...current, totalBytes, loadingProgress: 30, loadingStage: 'Loading static and dynamic recognizers...' }));
-        const [staticMetadata, dynamicMetadata, staticModel, dynamicModel] = await Promise.all([
-          fetchJSON('/models/static_mlp/metadata.json', version),
-          fetchJSON('/models/dynamic_gru/metadata.json', version),
-          loadLayersModel(tf, '/models/static_mlp/model.json', version, [1, 72]),
-          loadLayersModel(tf, '/models/dynamic_gru/model.json', version, [1, 60, 168]),
-        ]);
-        setState((current) => ({
-          ...current,
-          staticModel, staticMetadata, dynamicModel, dynamicMetadata,
-          isModelLoaded: true, loadingProgress: 100, loadedBytes: totalBytes,
-          loadingStage: `Hybrid recognizer ready on ${tf.getBackend().toUpperCase()}`,
-          loadingError: null,
-        }));
-      } catch (error) {
-        console.error('[ModelContext] Hybrid model loading failed:', error);
-        // Keep the overlay visible so the user can retry or explicitly continue
-        // without recognition. A failed promise must not permanently disable
-        // future retries in this session.
-        promiseRef.current = null;
-        setState((current) => ({
-          ...current, isModelLoaded: false, loadingError: error.message,
-          loadingStage: 'Recognition models failed to load',
-        }));
-      }
-    })();
+    promiseRef.current = loadRecognitionModels().catch((error) => {
+      promiseRef.current = null;
+      throw error;
+    });
     return promiseRef.current;
-  }, []);
-
-  const skipLoading = useCallback(() => {
-    setState((current) => ({ ...current, isModelLoaded: true }));
   }, []);
 
   const retryLoading = useCallback(() => {
@@ -97,7 +82,13 @@ export function ModelProvider({ children }) {
   }, [loadModels]);
 
   return (
-    <ModelContext.Provider value={{ ...state, loadModels, retryLoading, skipLoading }}>
+    <ModelContext.Provider value={{
+      ...state,
+      loadModels,
+      retryLoading,
+      predictStatic: inferStatic,
+      predictDynamic: inferDynamic,
+    }}>
       {children}
     </ModelContext.Provider>
   );

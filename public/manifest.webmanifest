@@ -1,0 +1,12 @@
+{
+  "name": "SignSync",
+  "short_name": "SignSync",
+  "description": "On-device ASL and FSL learning and translation",
+  "start_url": "/#home",
+  "display": "standalone",
+  "background_color": "#0b0f19",
+  "theme_color": "#0b0f19",
+  "icons": [
+    { "src": "/Logo_1.jpg", "sizes": "512x512", "type": "image/jpeg", "purpose": "any" }
+  ]
+}

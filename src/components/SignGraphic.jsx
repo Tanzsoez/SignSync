@@ -1,11 +1,21 @@
 import React from 'react';
+import { getSignReference } from '../data/verifiedSignReferences';
 
 /**
  * Realistic Anatomical Vector Hand Graphic Component for Sign Language Curriculum
  * Renders lifelike hands with organic human skin gradients, articulated phalanges,
  * realistic knuckle contours, keratin fingernails, and accurate poses for all 36 canonical symbols (A-Z, Ñ, 0-9).
  */
-export default function SignGraphic({ symbol = '', dialect = 'ASL', handShape = '', size = 180, isMastered = false, showPromptBadge = true }) {
+export default function SignGraphic({ signKey = '', symbol = '', dialect = 'ASL', handShape = '', size = 180, isMastered = false, showPromptBadge = true }) {
+  const signReference = getSignReference(signKey);
+  if (signReference) {
+    return (
+      <figure className="sign-photo-stage" style={{ height: `${size}px` }}>
+        <img src={signReference.src} alt={signReference.alt} loading="lazy" decoding="async" />
+        <figcaption>{dialect} reference image</figcaption>
+      </figure>
+    );
+  }
   const isASL = dialect === 'ASL';
   const accentColor = isASL ? '#38bdf8' : '#34d399';  // Bright cyan (ASL) / Mint emerald (FSL)
   const glowColor = isMastered
@@ -1071,6 +1081,7 @@ export default function SignGraphic({ symbol = '', dialect = 'ASL', handShape = 
           <span>📷 Tap to Copy</span>
         </div>
       )}
+      <span className="reference-review-label">Illustrated guide · photo review pending</span>
     </div>
   );
 }

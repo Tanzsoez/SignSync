@@ -2,12 +2,7 @@ import React, { lazy, Suspense, useState, useEffect, useRef, useCallback } from 
 import { Camera, CameraOff, Mic, MicOff, RefreshCw, Volume2, Sparkles, CheckCircle2, Shield, ListChecks, X } from 'lucide-react';
 import { useModel } from '../contexts/ModelContext';
 import { DynamicGestureTracker, refineFingerspellingPrediction } from '../utils/dynamicGestureEngine';
-import {
-  predictDynamicSequence,
-  predictStatic,
-  resampleTimedFrames,
-  SequenceRingBuffer,
-} from '../utils/sequenceInference';
+import { resampleTimedFrames } from '../utils/sequenceInference';
 import { DynamicGestureSegmenter } from '../utils/dynamicGestureSegmenter';
 import { loadHolistic } from '../utils/loadHolistic';
 import {
@@ -22,6 +17,7 @@ import {
   RuntimeDiagnostics,
   scheduleVideoFrame,
 } from '../utils/cameraRuntime';
+import { drawCameraGuide, getHandPositionGuidance } from '../utils/cameraGuidance';
 import { GestureRejectionGate, isIsolatedMiddleFingerGesture } from '../utils/gestureSafety';
 import { createSignSequence } from '../utils/textToSign';
 import RuntimeDiagnosticsPanel from '../components/RuntimeDiagnosticsPanel';
@@ -89,7 +85,7 @@ const extractDynamicFeaturesV2 = (rightHand, leftHand, pose) => {
 // handshape posture, body zone anchor, and finger extensions per the user's dataset guide.
 // Any candidate that violates its physical characteristics is strictly rejected.
 export default function TranslatorPage() {
-  const { staticModel, staticMetadata, dynamicModel, dynamicMetadata } = useModel();
+  const { isModelLoaded, predictStatic, predictDynamic } = useModel();
 
   const [activeSubTab, setActiveSubTab] = useState('sign-to-text'); // 'sign-to-text' | 'speech-to-sign'
   const [language, setLanguage] = useState(() => localStorage.getItem('signsync_dialect') || localStorage.getItem('signsync_lang') || 'ASL'); // 'ASL' | 'FSL'
@@ -163,6 +159,7 @@ export default function TranslatorPage() {
   const [confidence, setConfidence] = useState(0);
   const [isSignLocked, setIsSignLocked] = useState(false);
   const [handPostureStatus, setHandPostureStatus] = useState('Loading MediaPipe AI Engine...');
+  const [positioningGuidance, setPositioningGuidance] = useState({ level: 'waiting', message: 'Place your hand inside the guide' });
   // Speech/Text-to-Sign States
   const [inputMessage, setInputMessage] = useState('Hello');
   const [currentAnimatingWord, setCurrentAnimatingWord] = useState('Hello');
@@ -179,6 +176,7 @@ export default function TranslatorPage() {
   // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const speechRecognitionRef = useRef(null);
   const animFrameRef = useRef(null);
   const holisticRef = useRef(null);
   const holisticStabilizerRef = useRef(new HolisticTrackingStabilizer());
@@ -292,14 +290,14 @@ export default function TranslatorPage() {
   const lastQueuedHolisticTimestampRef = useRef(0);
 
   const scheduleStaticInference = (features, dialect, nowInMs) => {
-    if (!staticModel || !staticMetadata || sequenceInferenceBusyRef.current) return;
+    if (!isModelLoaded || sequenceInferenceBusyRef.current) return;
     if (nowInMs - lastSequenceInferenceRef.current < 65) return;
 
     lastSequenceInferenceRef.current = nowInMs;
     sequenceInferenceBusyRef.current = true;
     const inferenceStartedAt = performance.now();
     const generation = inferenceGenerationRef.current;
-    predictStatic({ model: staticModel, metadata: staticMetadata, features, dialect })
+    predictStatic(features, dialect)
       .then((prediction) => {
         runtimeDiagnosticsRef.current.recordPrediction(prediction, 'static');
         if (generation === inferenceGenerationRef.current) {
@@ -319,20 +317,18 @@ export default function TranslatorPage() {
 
   const scheduleDynamicInference = (frames, dialect, timestamps = null) => {
     if (
-      !dynamicModel || !dynamicMetadata || sequenceInferenceBusyRef.current ||
+      !isModelLoaded || sequenceInferenceBusyRef.current ||
       dynamicAwaitingResultRef.current || !frames?.length
     ) return false;
-    const completedSequence = new SequenceRingBuffer();
-    resampleTimedFrames(frames, timestamps).forEach((frame) => completedSequence.push(frame));
+    const resampledFrames = resampleTimedFrames(frames, timestamps);
+    const completedSequence = new Float32Array(resampledFrames.length * 168);
+    resampledFrames.forEach((frame, index) => completedSequence.set(frame, index * 168));
     sequenceInferenceBusyRef.current = true;
     dynamicAwaitingResultRef.current = true;
     dynamicPredictionReadyRef.current = false;
     const inferenceStartedAt = performance.now();
     const generation = inferenceGenerationRef.current;
-    predictDynamicSequence({
-      model: dynamicModel, metadata: dynamicMetadata,
-      ringBuffer: completedSequence, dialect,
-    }).then((prediction) => {
+    predictDynamic(completedSequence, dialect).then((prediction) => {
       runtimeDiagnosticsRef.current.recordPrediction(prediction, 'dynamic');
       if (generation === inferenceGenerationRef.current) {
         dynamicPredictionRef.current = prediction
@@ -500,7 +496,12 @@ export default function TranslatorPage() {
 
         // Draw face, chest, arms, hands and every finger from the same stabilized
         // Holistic result that feeds recognition.
+        drawCameraGuide(ctx);
         drawHolisticSkeleton(ctx, poseLandmarks, detectedHandLandmarks, faceLandmarks);
+        const nextGuidance = getHandPositionGuidance(detectedHandLandmarks);
+        setPositioningGuidance((current) => (
+          current.level === nextGuidance.level && current.message === nextGuidance.message ? current : nextGuidance
+        ));
 
         // 4. Add this frame to the rolling GRU sequence and classify asynchronously.
         // Throttled to ~28-30 FPS (every 35ms) to preserve mobile/tablet battery and eliminate thermal stutter on 120Hz displays
@@ -1117,6 +1118,8 @@ export default function TranslatorPage() {
         mediaStreamRef.current = null;
       }
       if (animFrameRef.current) cancelVideoFrame(videoRef.current, animFrameRef.current);
+      speechRecognitionRef.current?.abort?.();
+      speechRecognitionRef.current = null;
     };
   }, []);
 
@@ -1160,11 +1163,12 @@ export default function TranslatorPage() {
   }, [currentSequenceIndex, signSequence, playbackSpeed]);
   const toggleSpeechRecognition = () => {
     if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-      alert('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+      setSpeechStatus('Voice input is not supported in this browser. Type your message instead.');
       return;
     }
 
     if (isListening) {
+      speechRecognitionRef.current?.stop?.();
       setIsListening(false);
       setSpeechStatus('Voice recording stopped.');
       return;
@@ -1175,6 +1179,8 @@ export default function TranslatorPage() {
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.lang = language === 'FSL' ? 'fil-PH' : 'en-US';
+    speechRecognitionRef.current = recognition;
+    let completed = false;
 
     recognition.onstart = () => {
       setIsListening(true);
@@ -1182,6 +1188,7 @@ export default function TranslatorPage() {
     };
 
     recognition.onresult = (event) => {
+      completed = true;
       const transcript = event.results[0][0].transcript;
       setInputMessage(transcript);
       handleTriggerSign(transcript);
@@ -1189,12 +1196,40 @@ export default function TranslatorPage() {
       setSpeechStatus(`Recognized: "${transcript}"`);
     };
 
-    recognition.onerror = () => {
+    recognition.onnomatch = () => {
+      completed = true;
       setIsListening(false);
-      setSpeechStatus('Error capturing voice.');
+      setSpeechStatus('Speech was heard, but no words could be recognized. Please try again.');
     };
 
-    recognition.start();
+    recognition.onerror = (event) => {
+      completed = true;
+      setIsListening(false);
+      const messages = {
+        'not-allowed': 'Microphone permission was denied. Allow microphone access in your browser settings.',
+        'service-not-allowed': 'Voice recognition is disabled by this browser or device policy.',
+        'audio-capture': 'No working microphone was found. Check the selected input device.',
+        network: 'Voice recognition could not reach its speech service. Check your connection or type instead.',
+        'no-speech': 'No speech was detected. Move closer to the microphone and try again.',
+        aborted: 'Voice recording stopped.',
+        'language-not-supported': `Voice recognition does not support ${recognition.lang} on this device.`,
+      };
+      setSpeechStatus(messages[event.error] || `Voice recognition failed (${event.error || 'unknown error'}).`);
+    };
+
+    recognition.onend = () => {
+      speechRecognitionRef.current = null;
+      setIsListening(false);
+      if (!completed) setSpeechStatus('Voice recording ended before speech was recognized.');
+    };
+
+    try {
+      recognition.start();
+    } catch (error) {
+      speechRecognitionRef.current = null;
+      setIsListening(false);
+      setSpeechStatus(`Could not start the microphone: ${error.message}`);
+    }
   };
 
   const speakText = (text) => {
@@ -1583,7 +1618,7 @@ export default function TranslatorPage() {
                 style={{
                   position: 'relative',
                   width: '100%',
-                  height: 'clamp(280px, 45vh, 420px)',
+                  height: 'clamp(360px, 58vh, 620px)',
                   background: '#090d16',
                   borderRadius: 'var(--radius-md)',
                   overflow: 'hidden',
@@ -1647,6 +1682,11 @@ export default function TranslatorPage() {
                     </button>
                   </div>
                 )}
+              </div>
+
+              <div className={`camera-guidance camera-guidance-${positioningGuidance.level}`} role="status" aria-live="polite">
+                <span className="camera-guidance-dot" />
+                {positioningGuidance.message}
               </div>
 
               {/* Minimal Status Line */}
